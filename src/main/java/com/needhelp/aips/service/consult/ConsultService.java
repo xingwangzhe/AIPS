@@ -107,8 +107,9 @@ public class ConsultService {
 
         // ===== RAG: 从历史+当前消息中提取关键词检索药品 =====
         String searchText = buildSearchText(recentHistory, content);
-        String drugContext = searchDrugsVector(searchText);
-        log.info("RAG: searchText='{}' matched={}", searchText, !drugContext.isEmpty());
+        List<Medicine> matchedMeds = searchDrugsVectorMeds(searchText);
+        String drugContext = formatMedicines(matchedMeds);
+        log.info("RAG: searchText='{}' matched={}", searchText, matchedMeds.size());
 
         // ===== 构建对话消息列表 =====
         List<ChatMessage> messages = new ArrayList<>();
@@ -138,6 +139,8 @@ public class ConsultService {
             log.error("LLM 调用失败: {}", e.toString());
             aiMsg = fallbackWithContext(searchText, drugContext, recentHistory, content);
         }
+        // 注入匹配到的药品卡片供前端渲染
+        aiMsg.setMedicines(toMedicineCards(matchedMeds));
 
         if (aiMsg.getRiskLevel() != null && aiMsg.getRiskLevel() == 3) {
             aiMsg.setContent("该问题涉及高风险用药，建议转接人工药师。");
@@ -167,32 +170,34 @@ public class ConsultService {
         return sb.toString().trim();
     }
 
-    /** RAG 向量检索（主）→ keyword 降级 */
-    private String searchDrugsVector(String query) {
-        // 1. pgvector 语义向量检索（DeepSeek Embedding API）
+    /** RAG 向量检索（主）→ keyword 降级，返回 Medicine 列表 */
+    private List<Medicine> searchDrugsVectorMeds(String query) {
+        // 1. pgvector 语义向量检索
         try {
             float[] vec = embeddingService.embed(query);
             if (vec.length > 0) {
                 List<Long> ids = vectorRepo.searchSimilar(vec, 5);
                 if (!ids.isEmpty()) {
-                    log.info("pgvector 命中 {} 条", ids.size());
-                    return formatMedicines(medicineRepository.findAllById(ids));
+                    log.info("pgvector 命中 {}", ids.size());
+                    return medicineRepository.findAllById(ids);
                 }
             }
-        } catch (Exception e) {
-            log.warn("pgvector 检索失败: {}", e.getMessage());
-        }
+        } catch (Exception e) { log.warn("pgvector 检索失败: {}", e.getMessage()); }
 
-        // 2. 降级到 keyword LIKE 搜索
-        String kwResult = searchDrugsKeyword(query);
-        if (!kwResult.isEmpty()) return kwResult;
+        // 2. keyword 降级
+        List<Medicine> kw = searchDrugsKeywordList(query);
+        if (!kw.isEmpty()) return kw.stream().limit(5).toList();
 
         for (String sub : splitKeywords(query)) {
-            kwResult = searchDrugsKeyword(sub);
-            if (!kwResult.isEmpty()) return kwResult;
+            kw = searchDrugsKeywordList(sub);
+            if (!kw.isEmpty()) return kw.stream().limit(5).toList();
         }
+        return List.of();
+    }
 
-        return "";
+    /** RAG 向量检索（主）→ keyword 降级，返回字符串（兼容旧调用） */
+    private String searchDrugsVector(String query) {
+        return formatMedicines(searchDrugsVectorMeds(query));
     }
 
     /** 短词拆分：2-4 字滑动窗口 */
@@ -207,11 +212,31 @@ public class ConsultService {
     }
 
     private String searchDrugsKeyword(String kw) {
+        List<Medicine> meds = searchDrugsKeywordList(kw);
+        return meds.isEmpty() ? "" : formatMedicines(meds);
+    }
+
+    private List<Medicine> searchDrugsKeywordList(String kw) {
         try {
-            List<Medicine> meds = medicineRepository
+            return medicineRepository
                     .searchByKeyword(kw, org.springframework.data.domain.PageRequest.of(0, 5)).getContent();
-            return meds.isEmpty() ? "" : formatMedicines(meds);
-        } catch (Exception e) { return ""; }
+        } catch (Exception e) { return List.of(); }
+    }
+
+    /** 将 Medicine 列表转为前端可渲染的 MedicineCard DTO */
+    private List<AiReplyResponse.MedicineCard> toMedicineCards(List<Medicine> meds) {
+        if (meds == null || meds.isEmpty()) return List.of();
+        return meds.stream().map(m -> {
+            AiReplyResponse.MedicineCard c = new AiReplyResponse.MedicineCard();
+            c.setId(m.getId());
+            c.setName(m.getName());
+            c.setSpecification(m.getSpecification());
+            c.setPrice(m.getPrice());
+            c.setIsPrescription(m.getIsPrescription());
+            c.setStock(m.getStock());
+            c.setIndications(m.getIndications());
+            return c;
+        }).toList();
     }
 
     private String formatMedicines(List<Medicine> meds) {
