@@ -5,22 +5,21 @@ import com.needhelp.aips.dto.consult.*;
 import com.needhelp.aips.entity.Consultation;
 import com.needhelp.aips.entity.ConsultationMessage;
 import com.needhelp.aips.entity.Medicine;
-import com.needhelp.aips.repository.ConsultationMessageRepository;
-import com.needhelp.aips.repository.ConsultationRepository;
-import com.needhelp.aips.repository.MedicineRepository;
+import com.needhelp.aips.infrastructure.ai.EmbeddingService;
+import com.needhelp.aips.repository.*;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.annotation.PostConstruct;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
@@ -40,16 +39,38 @@ public class ConsultService {
     private final ConsultationRepository consultationRepository;
     private final ConsultationMessageRepository messageRepository;
     private final MedicineRepository medicineRepository;
+    private final MedicineVectorRepository vectorRepo;
+    private final EmbeddingService embeddingService;
     private final ChatModel chatModel;
 
     public ConsultService(ConsultationRepository consultationRepository,
                           ConsultationMessageRepository messageRepository,
                           MedicineRepository medicineRepository,
+                          MedicineVectorRepository vectorRepo,
+                          EmbeddingService embeddingService,
                           ChatModel chatModel) {
         this.consultationRepository = consultationRepository;
         this.messageRepository = messageRepository;
         this.medicineRepository = medicineRepository;
+        this.vectorRepo = vectorRepo;
+        this.embeddingService = embeddingService;
         this.chatModel = chatModel;
+    }
+
+    /** 启动时自动索引未索引药品的向量 */
+    @PostConstruct
+    void indexMedicines() {
+        long count = vectorRepo.countUnindexed();
+        if (count == 0) return;
+        log.info("开始向量索引 {} 个药品...", count);
+        List<Medicine> all = medicineRepository.findAll();
+        for (Medicine m : all) {
+            if (vectorRepo.hasEmbedding(m.getId())) continue;
+            String text = m.getName() + " " + m.getGenericName() + " " + m.getIndications();
+            float[] vec = embeddingService.embed(text);
+            if (vec.length > 0) vectorRepo.saveEmbedding(m.getId(), vec);
+        }
+        log.info("药品向量索引完成");
     }
 
     public SessionResponse createSession(Long userId, String title) {
@@ -82,9 +103,9 @@ public class ConsultService {
         userMsg.setMsgType(msgType != null ? msgType : 1);
         messageRepository.save(userMsg);
 
-        // ===== RAG: 智能检索 =====
-        String drugContext = searchDrugsSmart(content);
-        log.info("RAG 检索: keyword='{}' matched={}", content, !drugContext.isEmpty());
+        // ===== pgvector 语义检索 =====
+        String drugContext = searchDrugsVector(content);
+        log.info("Vector RAG: matched={}", !drugContext.isEmpty());
 
         // ===== LLM 调用 =====
         AiReplyResponse.AiMsg aiMsg;
@@ -134,25 +155,31 @@ public class ConsultService {
         return resp;
     }
 
-    /** 智能关键词拆分检索 */
-    private String searchDrugsSmart(String keyword) {
-        Set<String> keywords = new LinkedHashSet<>();
-        keywords.add(keyword);                           // 完整词
-        for (String s : keyword.split("[，。！？\\s]+"))   // 逗号/空格拆分
-            if (s.length() >= 2) keywords.add(s);
-        if (keyword.length() > 2)                        // 2-char 滑动窗口
-            for (int i = 0; i <= keyword.length() - 2; i++)
-                keywords.add(keyword.substring(i, i + 2));
-
-        Set<Medicine> all = new LinkedHashSet<>();
-        for (String kw : keywords) {
-            if (all.size() >= 5) break;
-            medicineRepository.searchByKeyword(kw, PageRequest.of(0, 5))
-                    .getContent().forEach(all::add);
+    /** pgvector 语义检索 → 降级关键词 */
+    private String searchDrugsVector(String query) {
+        try {
+            float[] vec = embeddingService.embed(query);
+            if (vec.length == 0) return searchDrugsKeyword(query);
+            List<Long> ids = vectorRepo.searchSimilar(vec, 5);
+            if (ids.isEmpty()) return searchDrugsKeyword(query);
+            return formatMedicines(medicineRepository.findAllById(ids));
+        } catch (Exception e) {
+            log.warn("向量检索失败: {}", e.getMessage());
+            return "";
         }
+    }
 
-        if (all.isEmpty()) return "";
-        return all.stream().limit(5)
+    private String searchDrugsKeyword(String keyword) {
+        try {
+            List<Medicine> meds = medicineRepository
+                    .searchByKeyword(keyword, org.springframework.data.domain.PageRequest.of(0, 5))
+                    .getContent();
+            return meds.isEmpty() ? "" : formatMedicines(meds);
+        } catch (Exception e) { return ""; }
+    }
+
+    private String formatMedicines(List<Medicine> meds) {
+        return meds.stream()
                 .map(m -> String.format("- %s【%s】%s · ¥%.2f · %s · 适应症：%s",
                         m.getName(), m.getIsPrescription() == 1 ? "RX" : "OTC",
                         m.getSpecification(), m.getPrice(),
