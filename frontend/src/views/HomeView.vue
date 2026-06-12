@@ -1,75 +1,48 @@
 <template>
-  <div class="pb-4">
+  <div>
     <AppHeader title="AIPS 线上购药" />
-
-    <!-- Banner -->
-    <div class="px-4 py-2">
-      <div class="bg-gradient-to-r from-blue-500 to-cyan-400 rounded-xl p-5 text-white shadow-md">
-        <h2 class="text-lg font-bold">AI 智能药师</h2>
-        <p class="text-sm text-blue-100 mt-1">7×24 小时用药咨询 · 症状自查 · 处方审核</p>
-        <el-button
-          size="small"
-          class="mt-3 !bg-white !text-blue-500 !border-0"
-          @click="$router.push('/consult')"
-        >
-          立即咨询 →
-        </el-button>
-      </div>
+    <div class="hero-banner">
+      <h2>AI 智能药师</h2>
+      <p>7×24 小时用药咨询 · 症状自查 · 处方审核</p>
+      <el-button style="margin-top:12px;background:#fff;color:#2563eb;border:none" @click="$router.push('/consult')">立即咨询 →</el-button>
     </div>
-
-    <!-- 搜索栏 -->
     <SearchBar />
-
-    <!-- 分类 -->
-    <CategoryGrid :categories="categories" @select="handleCategorySelect" />
-
-    <!-- 热门搜索 -->
-    <div class="px-4 py-2">
-      <h3 class="text-base font-semibold text-gray-800 mb-3">热门搜索</h3>
-      <div class="flex flex-wrap gap-2">
-        <span
-          v-for="kw in hotSearches"
-          :key="kw"
-          class="px-3 py-1.5 bg-white rounded-full text-sm text-gray-600 shadow-sm active:bg-blue-50 active:text-blue-500 cursor-pointer"
-          @click="handleSearch(kw)"
-        >{{ kw }}</span>
+    <CategoryGrid :categories="categories" @select="c => $router.push(`/search?categoryId=${c.id}`)" />
+    <div class="hot-section">
+      <h3>热门搜索</h3>
+      <div class="hot-tags">
+        <span v-for="kw in hotSearches" :key="kw" class="hot-tag" @click="$router.push(`/search?keyword=${kw}`)">{{ kw }}</span>
       </div>
     </div>
-
-    <!-- 推荐药品占位 -->
-    <div class="px-4 pt-2">
-      <h3 class="text-base font-semibold text-gray-800 mb-3">为您推荐</h3>
-      <p class="text-sm text-gray-400 text-center py-8">连接后端获取推荐数据...</p>
+    <div class="rec-section">
+      <h3>为您推荐</h3>
+      <p style="text-align:center;color:#9ca3af;padding:32px 0">连接后端获取推荐数据...</p>
     </div>
-
     <BottomNav />
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { useDrugStore } from '@/stores/drug.js'
 import AppHeader from '@/components/AppHeader.vue'
 import BottomNav from '@/components/BottomNav.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import CategoryGrid from '@/components/CategoryGrid.vue'
 
-const router = useRouter()
 const drugStore = useDrugStore()
-
 const categories = computed(() => drugStore.categories)
 const hotSearches = computed(() => drugStore.hotSearches)
-
-function handleCategorySelect(cat) {
-  router.push(`/search?categoryId=${cat.id}`)
-}
-
-function handleSearch(kw) {
-  router.push(`/search?keyword=${kw}`)
-}
-
-onMounted(() => {
-  drugStore.fetchCategories()
-})
+onMounted(() => drugStore.fetchCategories())
 </script>
+
+<style scoped>
+.hero-banner { margin: 8px 16px; padding: 24px; background: linear-gradient(135deg, #3b82f6, #06b6d4); border-radius: 12px; color: #fff; }
+.hero-banner h2 { font-size: 20px; font-weight: 700; margin: 0; }
+.hero-banner p { font-size: 14px; opacity: .85; margin: 4px 0 0; }
+.hot-section, .rec-section { padding: 8px 16px; }
+.hot-section h3, .rec-section h3 { font-size: 16px; font-weight: 600; color: #1f2937; margin-bottom: 12px; }
+.hot-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+.hot-tag { padding: 6px 16px; background: #fff; border-radius: 20px; font-size: 14px; color: #666; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+.hot-tag:active { background: #eff6ff; color: #3b82f6; }
+</style>

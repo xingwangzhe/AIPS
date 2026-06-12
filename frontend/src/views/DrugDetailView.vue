@@ -1,73 +1,47 @@
 <template>
-  <div class="pb-20">
+  <div>
     <AppHeader title="药品详情" show-back />
-
-    <div v-if="loading" class="text-center py-20 text-gray-400">加载中...</div>
-    <div v-else-if="!drug" class="text-center py-20 text-gray-400">药品不存在</div>
+    <div v-if="loading" style="text-align:center;padding:80px;color:#9ca3af">加载中...</div>
+    <div v-else-if="!drug" style="text-align:center;padding:80px;color:#9ca3af">药品不存在</div>
     <template v-else>
-      <!-- 药品图片 -->
-      <div class="bg-white p-6 flex justify-center">
-        <div class="w-40 h-40 bg-gray-100 rounded-xl flex items-center justify-center">
-          <span class="text-6xl">💊</span>
+      <div class="detail-img"><span>💊</span></div>
+      <div class="detail-info">
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px">
+          <span :class="drug.isPrescription ? 'tag-rx' : 'tag-otc'">{{ drug.isPrescription ? 'RX 处方药' : 'OTC 非处方药' }}</span>
+          <h1 class="detail-name">{{ drug.name }}</h1>
         </div>
+        <p style="font-size:14px;color:#9ca3af">{{ drug.genericName }}</p>
+        <p style="font-size:12px;color:#9ca3af;margin-top:4px">{{ drug.specification }} · {{ drug.manufacturer }}</p>
+        <div style="display:flex;align-items:baseline;gap:8px;margin-top:16px">
+          <span style="font-size:24px;font-weight:700;color:#ef4444">{{ formatPrice(drug.price) }}</span>
+          <span v-if="drug.originalPrice" style="font-size:14px;color:#9ca3af;text-decoration:line-through">{{ formatPrice(drug.originalPrice) }}</span>
+        </div>
+        <p :style="{fontSize:'12px',marginTop:'4px',color:drug.stock>0?'#16a34a':'#ef4444'}">{{ drug.stock > 0 ? '库存 '+drug.stock+' 件' : '暂时缺货' }}</p>
       </div>
-
-      <!-- 基本信息 -->
-      <div class="bg-white px-4 pb-4">
-        <div class="flex items-start gap-2 mb-2">
-          <span :class="drug.isPrescription ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'"
-                class="text-xs px-2 py-0.5 rounded font-medium mt-1">
-            {{ drug.isPrescription ? 'RX 处方药' : 'OTC 非处方药' }}
-          </span>
-          <h1 class="text-lg font-bold text-gray-800">{{ drug.name }}</h1>
-        </div>
-        <p class="text-sm text-gray-400">{{ drug.genericName }}</p>
-        <p class="text-xs text-gray-400 mt-1">{{ drug.specification }} · {{ drug.manufacturer }}</p>
-
-        <div class="flex items-baseline gap-2 mt-4">
-          <span class="text-2xl font-bold text-red-500">{{ formatPrice(drug.price) }}</span>
-          <span v-if="drug.originalPrice" class="text-sm text-gray-400 line-through">{{ formatPrice(drug.originalPrice) }}</span>
-        </div>
-        <p class="text-xs mt-1" :class="drug.stock > 0 ? 'text-green-500' : 'text-red-500'">
-          {{ drug.stock > 0 ? `库存 ${drug.stock} 件` : '暂时缺货' }}
-        </p>
-      </div>
-
-      <!-- 详细信息 Tab -->
-      <div class="mt-3 bg-white">
-        <el-tabs v-model="activeTab" class="px-4">
-          <el-tab-pane label="适应症" name="indications">
-            <p class="text-sm text-gray-600 leading-relaxed whitespace-pre-line">{{ drug.indications || '暂无' }}</p>
-          </el-tab-pane>
-          <el-tab-pane label="用法用量" name="dosage">
-            <p class="text-sm text-gray-600 leading-relaxed whitespace-pre-line">{{ drug.dosage || '暂无' }}</p>
-          </el-tab-pane>
-          <el-tab-pane label="禁忌" name="contraindications">
-            <p class="text-sm text-red-500 leading-relaxed whitespace-pre-line">{{ drug.contraindications || '暂无' }}</p>
-          </el-tab-pane>
+      <div style="margin-top:12px;background:#fff">
+        <el-tabs v-model="activeTab" style="padding:0 16px">
+          <el-tab-pane label="适应症" name="indications"><p style="font-size:14px;color:#666;line-height:1.6;white-space:pre-line">{{ drug.indications || '暂无' }}</p></el-tab-pane>
+          <el-tab-pane label="用法用量" name="dosage"><p style="font-size:14px;color:#666;line-height:1.6;white-space:pre-line">{{ drug.dosage || '暂无' }}</p></el-tab-pane>
+          <el-tab-pane label="禁忌" name="contraindications"><p style="font-size:14px;color:#ef4444;line-height:1.6;white-space:pre-line">{{ drug.contraindications || '暂无' }}</p></el-tab-pane>
           <el-tab-pane label="评价" name="reviews">
-            <div v-if="drug.reviews?.length" class="flex flex-col gap-3">
-              <div v-for="(r, i) in drug.reviews" :key="i" class="border-b border-gray-100 pb-3">
-                <div class="flex items-center gap-2 mb-1">
-                  <span class="text-sm font-medium">{{ r.userName }}</span>
-                  <span class="text-yellow-500 text-xs">{{ '★'.repeat(r.rating) }}{{ '☆'.repeat(5 - r.rating) }}</span>
+            <div v-if="drug.reviews?.length" style="display:flex;flex-direction:column;gap:12px">
+              <div v-for="(r,i) in drug.reviews" :key="i" style="border-bottom:1px solid #f3f4f6;padding-bottom:12px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                  <span style="font-size:14px;font-weight:500">{{ r.userName }}</span>
+                  <span style="color:#f59e0b;font-size:12px">{{ '★'.repeat(r.rating) }}{{ '☆'.repeat(5-r.rating) }}</span>
                 </div>
-                <p class="text-sm text-gray-600">{{ r.content }}</p>
+                <p style="font-size:14px;color:#666">{{ r.content }}</p>
               </div>
             </div>
-            <p v-else class="text-sm text-gray-400 py-4">暂无评价</p>
+            <p v-else style="font-size:14px;color:#9ca3af;padding:16px 0">暂无评价</p>
           </el-tab-pane>
         </el-tabs>
       </div>
+      <div v-if="drug" class="detail-bottom-bar">
+        <el-button size="large" style="flex:1" @click="$router.push('/consult')">咨询药师</el-button>
+        <el-button size="large" type="primary" style="flex:1" :disabled="drug.stock <= 0" @click="handleAddToCart">加入购物车</el-button>
+      </div>
     </template>
-
-    <!-- 底部操作栏 -->
-    <div v-if="drug" class="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-3 flex gap-3 safe-area-bottom">
-      <el-button size="large" class="flex-1" @click="$router.push('/consult')">咨询药师</el-button>
-      <el-button size="large" type="primary" class="flex-1" :disabled="drug.stock <= 0" @click="handleAddToCart">
-        加入购物车
-      </el-button>
-    </div>
   </div>
 </template>
 
@@ -81,26 +55,18 @@ import { ElMessage } from 'element-plus'
 import AppHeader from '@/components/AppHeader.vue'
 
 const route = useRoute()
-const drug = ref(null)
-const loading = ref(true)
-const activeTab = ref('indications')
-
-async function handleAddToCart() {
-  try {
-    await addToCart(drug.value.id, 1)
-    ElMessage.success('已加入购物车')
-  } catch (e) {
-    ElMessage.error(e.message || '添加失败')
-  }
-}
-
-onMounted(async () => {
-  try {
-    drug.value = await getDrugDetail(route.params.id)
-  } catch {
-    drug.value = null
-  } finally {
-    loading.value = false
-  }
-})
+const drug = ref(null); const loading = ref(true); const activeTab = ref('indications')
+async function handleAddToCart() { try { await addToCart(drug.value.id, 1); ElMessage.success('已加入购物车') } catch(e) { ElMessage.error(e.message) } }
+onMounted(async () => { try { drug.value = await getDrugDetail(route.params.id) } catch { drug.value = null } finally { loading.value = false } })
 </script>
+
+<style scoped>
+.detail-img { background:#fff;padding:24px;display:flex;justify-content:center; }
+.detail-img span { font-size:80px; }
+.detail-info { background:#fff;padding:0 16px 16px; }
+.detail-name { font-size:18px;font-weight:700;color:#1f2937;margin:0; }
+.tag-rx, .tag-otc { font-size:11px;padding:2px 6px;border-radius:3px;font-weight:500; }
+.tag-rx { background:#fee2e2;color:#dc2626; }
+.tag-otc { background:#dcfce7;color:#16a34a; }
+.detail-bottom-bar { position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e5e7eb;padding:12px 16px;display:flex;gap:12px;padding-bottom:max(12px, env(safe-area-inset-bottom)); }
+</style>

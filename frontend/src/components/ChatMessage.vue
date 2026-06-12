@@ -1,45 +1,32 @@
 <template>
-  <div class="flex mb-4" :class="msg.senderType === 1 ? 'justify-end' : 'justify-start'">
-    <!-- AI/Avatar -->
-    <div v-if="msg.senderType !== 1" class="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center mr-2 flex-shrink-0">
-      <span class="text-sm">{{ msg.senderType === 2 ? '🤖' : '👨‍⚕️' }}</span>
-    </div>
-
-    <div class="max-w-[75%]">
-      <!-- 消息气泡 -->
-      <div
-        class="rounded-2xl px-4 py-2.5 text-sm leading-relaxed"
-        :class="msg.senderType === 1
-          ? 'bg-blue-500 text-white rounded-br-md'
-          : 'bg-white text-gray-700 rounded-bl-md shadow-sm'"
-      >
-        {{ msg.content }}
-      </div>
-
-      <!-- 风险标签 -->
-      <div v-if="msg.riskLevel" class="mt-1 ml-1">
-        <span
-          class="text-xs px-2 py-0.5 rounded-full"
-          :class="riskClass(msg.riskLevel)"
-        >
-          {{ riskText(msg.riskLevel) }}
-        </span>
-        <span v-if="msg.disclaimerShown" class="text-xs text-gray-400 ml-1">仅供参考</span>
+  <div class="msg-row" :class="msg.senderType === 1 ? 'msg-right' : 'msg-left'">
+    <div v-if="msg.senderType !== 1" class="msg-avatar">{{ msg.senderType === 2 ? '🤖' : '👨‍⚕️' }}</div>
+    <div class="msg-body">
+      <div class="msg-bubble" :class="msg.senderType === 1 ? 'bubble-user' : 'bubble-ai'">{{ msg.content }}</div>
+      <div v-if="msg.riskLevel" class="msg-risk">
+        <span class="risk-badge" :class="'risk-' + msg.riskLevel">{{ riskLevelText(msg.riskLevel) }}</span>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-defineProps({
-  msg: { type: Object, required: true },
-})
-
-function riskClass(level) {
-  return level === 3 ? 'bg-red-100 text-red-600' : level === 2 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-600'
-}
-
-function riskText(level) {
-  return level === 3 ? '高风险⚠' : level === 2 ? '中风险⚡' : '低风险✅'
-}
+defineProps({ msg: { type: Object, required: true } })
+function riskLevelText(l) { return l === 3 ? '高风险⚠' : l === 2 ? '中风险⚡' : '低风险✅' }
 </script>
+
+<style scoped>
+.msg-row { display: flex; margin-bottom: 16px; }
+.msg-right { justify-content: flex-end; }
+.msg-left { justify-content: flex-start; }
+.msg-avatar { width: 32px; height: 32px; border-radius: 50%; background: #dbeafe; display: flex; align-items: center; justify-content: center; margin-right: 8px; flex-shrink: 0; font-size: 14px; }
+.msg-body { max-width: 75%; }
+.msg-bubble { padding: 10px 16px; border-radius: 16px; font-size: 14px; line-height: 1.5; }
+.bubble-user { background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }
+.bubble-ai { background: #fff; color: #374151; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+.msg-risk { margin-top: 4px; }
+.risk-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+.risk-1 { background: #dcfce7; color: #16a34a; }
+.risk-2 { background: #fef9c3; color: #ca8a04; }
+.risk-3 { background: #fee2e2; color: #dc2626; }
+</style>

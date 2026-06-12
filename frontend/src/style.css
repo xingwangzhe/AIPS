@@ -1,7 +1,5 @@
-@import "tailwindcss";
 @import "element-plus/dist/index.css";
 
-/* AIPS 全局样式 */
 :root {
   --aips-primary: #409EFF;
   --aips-success: #67C23A;
@@ -14,7 +12,6 @@ body {
   padding: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background-color: #f5f7fa;
-  -webkit-font-smoothing: antialiased;
 }
 
 #app {
