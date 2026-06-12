@@ -11,7 +11,8 @@ build/
 # IDE
 # ============================================================
 ### IntelliJ IDEA ###
-.idea
+.idea/*
+!.idea/runConfigurations/
 *.iws
 *.iml
 *.ipr
