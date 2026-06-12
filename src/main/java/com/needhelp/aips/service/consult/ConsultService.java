@@ -167,15 +167,38 @@ public class ConsultService {
         return sb.toString().trim();
     }
 
-    /** pgvector 语义检索 → 降级关键词 */
+    /** 混合检索：先 keyword（快），pgvector 作为增强（需扩展已安装） */
     private String searchDrugsVector(String query) {
+        // 1. 先用 keyword 快速搜（不依赖 API）
+        String kwResult = searchDrugsKeyword(query);
+        if (!kwResult.isEmpty()) return kwResult;
+
+        // 2. keyword 没命中时尝试短词拆分再搜
+        for (String sub : splitKeywords(query)) {
+            kwResult = searchDrugsKeyword(sub);
+            if (!kwResult.isEmpty()) return kwResult;
+        }
+
+        // 3. pgvector（仅在扩展可用时生效）
         try {
             float[] vec = embeddingService.embed(query);
-            if (vec.length == 0) return searchDrugsKeyword(query);
-            List<Long> ids = vectorRepo.searchSimilar(vec, 5);
-            if (ids.isEmpty()) return searchDrugsKeyword(query);
-            return formatMedicines(medicineRepository.findAllById(ids));
-        } catch (Exception e) { return searchDrugsKeyword(query); }
+            if (vec.length > 0) {
+                List<Long> ids = vectorRepo.searchSimilar(vec, 5);
+                if (!ids.isEmpty()) return formatMedicines(medicineRepository.findAllById(ids));
+            }
+        } catch (Exception e) { /* pgvector 不可用，忽略 */ }
+        return "";
+    }
+
+    /** 短词拆分：2-4 字滑动窗口 */
+    private List<String> splitKeywords(String query) {
+        List<String> parts = new ArrayList<>();
+        for (String s : query.split("[，。！？\\s,]+")) {
+            if (s.length() >= 2 && s.length() <= 4) parts.add(s);
+            else for (int i = 0; i <= s.length() - 2; i++)
+                parts.add(s.substring(i, Math.min(i + 3, s.length())));
+        }
+        return parts;
     }
 
     private String searchDrugsKeyword(String kw) {
@@ -257,22 +280,49 @@ public class ConsultService {
 
         // 有药品匹配结果 → 直接推荐
         if (!drugContext.isEmpty()) {
-            ai.setContent("根据您的症状，推荐以下药品：\n" + drugContext);
+            ai.setContent("根据您的描述，推荐以下药品：\n" + drugContext + "\n\n请在药师指导下选用。");
             ai.setMedicineAdvice(drugContext);
             ai.setRiskLevel(1);
             ai.setDisclaimer("本建议仅供参考。");
             return ai;
         }
 
-        // 有关键词但没搜到药 → 建议去搜索页
+        // 检查是否是追问（用户想知道更多药）
         String lower = searchText.toLowerCase();
-        if (lower.length() > 2 && (lower.contains("药") || lower.contains("痛") || lower.contains("病") || lower.contains("咳"))) {
-            ai.setContent("您提到了「" + searchText.replace("\n", " ") + "」，建议前往药品搜索页查找具体药品，或提供更详细的症状描述。");
+        boolean isFollowUp = current.contains("药") || current.contains("什么") || current.contains("怎么")
+                || current.contains("推荐") || current.contains("还有") || current.contains("其他");
+
+        // 如果有症状关键词，给出具体建议
+        if (lower.contains("头痛") || lower.contains("头晕") || lower.contains("发烧") || lower.contains("发热") || lower.contains("感冒") || lower.contains("咳嗽")) {
+            ai.setContent("头痛/发热/咳嗽可能是感冒或流感引起。系统中可选用布洛芬缓释胶囊(¥19.90)或对乙酰氨基酚片(¥12.50)，请在药师指导下使用。");
+            ai.setMedicineAdvice("布洛芬缓释胶囊 ¥19.90 / 对乙酰氨基酚片 ¥12.50");
+            ai.setSymptomAnalysis("疑似上呼吸道感染症状");
+        } else if (lower.contains("胃") || lower.contains("消化") || lower.contains("肚子") || lower.contains("腹泻") || lower.contains("拉肚子") || lower.contains("恶心") || lower.contains("呕吐")) {
+            ai.setContent("消化系统不适。系统中可选用蒙脱石散(¥15.50)止泻，或奥美拉唑肠溶胶囊(¥28.00)缓解胃酸过多。注意清淡饮食，如症状持续请就医。");
+            ai.setMedicineAdvice("蒙脱石散 ¥15.50 / 奥美拉唑肠溶胶囊 ¥28.00");
+            ai.setSymptomAnalysis("疑似消化系统功能紊乱");
+        } else if (lower.contains("过敏") || lower.contains("皮疹") || lower.contains("痒") || lower.contains("皮肤")) {
+            ai.setContent("皮肤过敏症状。建议避免接触过敏原，可外用红霉素软膏(¥8.90)。如出现严重过敏反应（呼吸困难、面部肿胀）请立即就医。");
+            ai.setMedicineAdvice("红霉素软膏 ¥8.90");
+            ai.setSymptomAnalysis("疑似皮肤过敏反应");
+        } else if (lower.contains("血压") || lower.contains("高压") || lower.contains("降压")) {
+            ai.setContent("高血压需要长期规范治疗。氨氯地平贝那普利片(¥35.00)为处方药，需凭医师处方购买，请在医生指导下使用。");
+            ai.setMedicineAdvice("氨氯地平贝那普利片 ¥35.00（处方药）");
+            ai.setSymptomAnalysis("高血压相关咨询");
+            ai.setRiskLevel(2);
+        } else if (lower.contains("血糖") || lower.contains("糖尿") || lower.contains("胰岛素")) {
+            ai.setContent("糖尿病用药需要严格医学监督。二甲双胍缓释片(¥28.80)为处方药，需凭医师处方购买。请勿自行调整用药方案。");
+            ai.setMedicineAdvice("二甲双胍缓释片 ¥28.80（处方药）");
+            ai.setSymptomAnalysis("糖尿病相关咨询");
+            ai.setRiskLevel(3);
+        } else if (isFollowUp) {
+            ai.setContent("请告诉我您具体的症状（如头痛、胃痛、咳嗽、过敏等），我可以为您推荐系统中匹配的药品。");
         } else {
-            ai.setContent("请详细描述您的症状（如头痛、发烧、咳嗽等），告诉我哪里不舒服，以便为您推荐合适的药品。");
+            ai.setContent("请详细描述您的症状（如头痛、发烧、咳嗽、胃痛、过敏等），告诉我哪里不舒服，以便为您推荐合适的药品。");
         }
-        ai.setRiskLevel(1);
-        ai.setDisclaimer("本建议仅供参考。");
+        ai.setWarnings("如症状持续或加重，请及时就医。");
+        ai.setRiskLevel(ai.getRiskLevel() != null ? ai.getRiskLevel() : 1);
+        ai.setDisclaimer("本建议仅供参考，请遵医嘱或咨询专业药师。");
         return ai;
     }
 }
