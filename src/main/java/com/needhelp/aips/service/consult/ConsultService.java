@@ -8,7 +8,10 @@ import com.needhelp.aips.entity.Medicine;
 import com.needhelp.aips.repository.ConsultationMessageRepository;
 import com.needhelp.aips.repository.ConsultationRepository;
 import com.needhelp.aips.repository.MedicineRepository;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.request.ChatRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
@@ -17,27 +20,21 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * 智能咨询服务（LangChain4j 版）。
- * ChatModel 自动注入 + 数据库药品检索（RAG）。
- */
 @Service
 public class ConsultService {
 
     private static final Logger log = LoggerFactory.getLogger(ConsultService.class);
 
     private static final String SYSTEM_PROMPT = """
-            你是一名专业的 AI 药师助手。根据用户症状进行分析，
-            优先推荐系统药品库中的药品（名称/价格/库存/适应症会附在上下文）。
-            处方药标注"请遵医嘱"。
-
-            严格以 JSON 回复：
-            {"content":"...","symptomAnalysis":"...","medicineAdvice":"...","warnings":"...","riskLevel":1}
+            你是一名专业 AI 药师助手。根据用户症状进行分析，
+            优先推荐系统药品库中匹配到的药品（名称/价格/库存/适应症）。
+            处方药标注"请遵医嘱"，严格以 JSON 格式回复：
+            {"content":"完整回复","symptomAnalysis":"症状分析","medicineAdvice":"用药建议（含药品名称和价格）","warnings":"注意事项","riskLevel":1}
             riskLevel: 1=低风险OTC 2=中风险(处方药) 3=高风险(转人工)
-            末尾附免责声明。
+            回复末尾附："本建议仅供参考，请遵医嘱或咨询专业药师。"
             """;
 
     private final ConsultationRepository consultationRepository;
@@ -53,7 +50,6 @@ public class ConsultService {
         this.messageRepository = messageRepository;
         this.medicineRepository = medicineRepository;
         this.chatModel = chatModel;
-        log.info("LangChain4j ChatModel ready: {}", chatModel);
     }
 
     public SessionResponse createSession(Long userId, String title) {
@@ -86,25 +82,37 @@ public class ConsultService {
         userMsg.setMsgType(msgType != null ? msgType : 1);
         messageRepository.save(userMsg);
 
-        // RAG：检索药品库
-        String drugContext = searchDrugs(content);
+        // ===== RAG: 智能检索 =====
+        String drugContext = searchDrugsSmart(content);
+        log.info("RAG 检索: keyword='{}' matched={}", content, !drugContext.isEmpty());
 
+        // ===== LLM 调用 =====
         AiReplyResponse.AiMsg aiMsg;
         try {
-            String prompt = SYSTEM_PROMPT + "\n\n"
-                    + (drugContext.isEmpty() ? "" : "【药品库匹配】\n" + drugContext + "\n\n")
-                    + "【用户问题】\n" + content;
+            String userPrompt = drugContext.isEmpty()
+                    ? content
+                    : "【药品库匹配结果】\n" + drugContext + "\n\n【用户问题】\n" + content;
 
-            String reply = chatModel.chat(prompt);
-            log.debug("LLM 回复: {}", reply);
+            String reply = chatModel.chat(
+                    ChatRequest.builder()
+                            .messages(List.of(
+                                    SystemMessage.from(SYSTEM_PROMPT),
+                                    UserMessage.from(userPrompt)
+                            ))
+                            .build()
+            ).aiMessage().text();
+
+            log.info("LLM 回复 length={}", reply.length());
             aiMsg = parseStructuredReply(reply);
+
         } catch (Exception e) {
-            log.error("LLM 调用失败: {}", e.getMessage());
-            aiMsg = fallbackReply(content);
+            log.error("LLM 调用失败: {}", e.toString());
+            // 降级：仍搜数据库给出真实药品推荐
+            aiMsg = fallbackWithDrugs(content, drugContext);
         }
 
         if (aiMsg.getRiskLevel() != null && aiMsg.getRiskLevel() == 3) {
-            aiMsg.setContent("您的问题涉及高风险用药，AI 无法直接作答。建议转接人工药师。");
+            aiMsg.setContent("该问题涉及高风险用药，AI 无法直接作答。建议转接人工药师。");
             aiMsg.setMedicineAdvice("");
         }
 
@@ -126,19 +134,31 @@ public class ConsultService {
         return resp;
     }
 
-    private String searchDrugs(String keyword) {
-        try {
-            List<Medicine> meds = medicineRepository
-                    .searchByKeyword(keyword, PageRequest.of(0, 5)).getContent();
-            if (meds.isEmpty()) return "";
-            return meds.stream()
-                    .map(m -> String.format("- %s【%s】%s · ¥%.2f · %s · 适应症：%s",
-                            m.getName(), m.getIsPrescription() == 1 ? "RX" : "OTC",
-                            m.getSpecification(), m.getPrice(),
-                            m.getStock() > 0 ? "库存" + m.getStock() : "缺货",
-                            m.getIndications() != null ? m.getIndications() : "暂无"))
-                    .collect(Collectors.joining("\n"));
-        } catch (Exception e) { return ""; }
+    /** 智能关键词拆分检索 */
+    private String searchDrugsSmart(String keyword) {
+        Set<String> keywords = new LinkedHashSet<>();
+        keywords.add(keyword);                           // 完整词
+        for (String s : keyword.split("[，。！？\\s]+"))   // 逗号/空格拆分
+            if (s.length() >= 2) keywords.add(s);
+        if (keyword.length() > 2)                        // 2-char 滑动窗口
+            for (int i = 0; i <= keyword.length() - 2; i++)
+                keywords.add(keyword.substring(i, i + 2));
+
+        Set<Medicine> all = new LinkedHashSet<>();
+        for (String kw : keywords) {
+            if (all.size() >= 5) break;
+            medicineRepository.searchByKeyword(kw, PageRequest.of(0, 5))
+                    .getContent().forEach(all::add);
+        }
+
+        if (all.isEmpty()) return "";
+        return all.stream().limit(5)
+                .map(m -> String.format("- %s【%s】%s · ¥%.2f · %s · 适应症：%s",
+                        m.getName(), m.getIsPrescription() == 1 ? "RX" : "OTC",
+                        m.getSpecification(), m.getPrice(),
+                        m.getStock() > 0 ? "库存" + m.getStock() : "缺货",
+                        m.getIndications() != null ? m.getIndications() : "暂无"))
+                .collect(Collectors.joining("\n"));
     }
 
     public TransferResponse transferToHuman(Long userId, Long sessionId, String reason) {
@@ -156,7 +176,7 @@ public class ConsultService {
         return resp;
     }
 
-    // ============ JSON 解析 ============
+    // ========== JSON 解析 ==========
 
     private AiReplyResponse.AiMsg parseStructuredReply(String content) {
         AiReplyResponse.AiMsg ai = new AiReplyResponse.AiMsg();
@@ -201,15 +221,28 @@ public class ConsultService {
         try { return Integer.parseInt(n.toString()); } catch (NumberFormatException e) { return d; }
     }
 
-    private AiReplyResponse.AiMsg fallbackReply(String content) {
+    // ========== 降级（含数据库检索） ==========
+
+    private AiReplyResponse.AiMsg fallbackWithDrugs(String content, String drugContext) {
         AiReplyResponse.AiMsg ai = new AiReplyResponse.AiMsg();
         String l = content.toLowerCase();
-        if (l.contains("头痛") || l.contains("发烧") || l.contains("感冒")) {
-            ai.setContent("可能是感冒引起。");
+
+        if (!drugContext.isEmpty()) {
+            ai.setContent("根据您的症状，系统中有以下匹配药品：\n" + drugContext + "\n\n建议在药师指导下选用。");
+            ai.setMedicineAdvice(drugContext);
+        } else if (l.contains("头痛") || l.contains("发烧") || l.contains("感冒") || l.contains("脑热")) {
+            ai.setContent("头痛发热可能是感冒引起，建议多休息、多喝水。系统中可选用布洛芬缓释胶囊或对乙酰氨基酚片。");
             ai.setMedicineAdvice("布洛芬缓释胶囊(¥19.90) 或 对乙酰氨基酚片(¥12.50)");
-            ai.setRiskLevel(1);
-        } else { ai.setContent("建议提供更多症状信息。"); ai.setRiskLevel(1); }
-        ai.setDisclaimer("本建议仅供参考。");
+        } else if (l.contains("胃痛") || l.contains("腹泻") || l.contains("消化不良")) {
+            ai.setContent("消化系统不适，建议清淡饮食。");
+            ai.setMedicineAdvice("蒙脱石散(¥15.50) 或 奥美拉唑肠溶胶囊(¥28.00)");
+        } else {
+            ai.setContent("请详细描述您的症状（如头痛、发烧、咳嗽、胃痛等），以便为您推荐合适的药品。");
+        }
+        ai.setSymptomAnalysis(l.contains("头痛") || l.contains("发烧") ? "疑似感冒症状" : "信息不足");
+        ai.setRiskLevel(1);
+        ai.setWarnings("如症状持续或加重，请及时就医。");
+        ai.setDisclaimer("本建议仅供参考，请遵医嘱或咨询专业药师。");
         return ai;
     }
 }
