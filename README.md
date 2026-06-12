@@ -8,37 +8,38 @@
 
 ### 后端
 
-| 技术 | 版本 |
-|------|------|
-| Java | 25 |
-| Spring Boot | 4.1.0 |
-| Gradle (Groovy DSL) | 9.x |
-| Hibernate | 7.4 |
-| PostgreSQL | 18.4 |
-| Spring Security + JWT | — |
-| LangChain4j + DeepSeek V4 | — |
+| 技术 | 版本 | 说明 |
+|------|------|------|
+| Java | 21 | OpenJDK |
+| Spring Boot | 3.4.5 | Spring Framework 6.x |
+| Gradle (Groovy DSL) | 9.x | |
+| Hibernate | 6.x | JPA 实现 |
+| PostgreSQL | 18.4 | 主数据库 |
+| H2 | — | 测试数据库 |
+| Spring Security + JWT | — | 无状态认证 |
+| LangChain4j | 1.16.2 | LLM 框架 |
+| DeepSeek V4 | — | AI 模型（OpenAI 兼容协议） |
 
 ### 前端
 
-| 技术 | 版本 |
-|------|------|
-| Vue 3 | 3.5 |
-| Vite | 8.0 |
-| Pinia | 3.0 |
-| Vue Router | 5.1 |
-| Element Plus | 2.14 |
-| Tailwind CSS | 4.3 |
-| oxlint / oxfmt | — |
-| Vitest | 4.1 |
+| 技术 | 版本 | 说明 |
+|------|------|------|
+| Vue 3 | 3.5 | Composition API + `<script setup>` |
+| Vite | 8.0 | 构建工具 |
+| Pinia | 3.0 | 状态管理 |
+| Vue Router | 5.1 | 路由 |
+| Element Plus | 2.14 | UI 组件库 |
+| Tailwind CSS | 4.3 | 原子化 CSS |
+| oxlint / oxfmt | — | Lint / 格式化 |
+| Vitest | 4.1 | 单元测试 |
 
 ## 快速开始
 
 ### 环境要求
 
-- Java 25+
+- JDK 21+
 - Node.js 24+ / Bun 1.3+
 - PostgreSQL 16+
-- IntelliJ IDEA 2025+（推荐）
 
 ### 1. 克隆仓库
 
@@ -50,7 +51,7 @@ cd AIPS
 ### 2. 配置环境变量
 
 ```bash
-cp .env.example .env          # 编辑填入真实数据库/LLM 密钥
+cp .env.example .env          # 填入数据库密码、LLM API Key
 cp frontend/.env.example frontend/.env
 ```
 
@@ -60,69 +61,77 @@ cp frontend/.env.example frontend/.env
 sudo -u postgres psql << SQL
 CREATE USER aips WITH PASSWORD 'aips123';
 CREATE DATABASE aips OWNER aips;
-\c aips
 GRANT ALL ON SCHEMA public TO aips;
 SQL
 ```
 
-首次启动后端时 JPA 会自动建表（18 张）并插入种子数据（14 分类 + 8 药品 + 3 药师 + 2 横幅）。
+首次启动时 JPA 自动建表（18 张）并插入种子数据（14 分类 + 8 药品 + 3 药师 + 2 横幅）。
 
 ### 4. 启动
 
-#### IntelliJ IDEA 一键启动（推荐）
+#### IDEA 一键启动（推荐）
 
-打开项目后，工具栏 Run Configurations 下拉选择：
+Run Configurations → **Full Stack (Backend + Frontend)**
 
 | 配置 | 说明 |
 |------|------|
-| **Full Stack (Backend + Frontend)** | 前后端同时启动 |
-| Backend (bootRun) | 仅后端（端口 8080） |
-| Frontend (bun dev) | 仅前端（端口 5173） |
+| Full Stack | 前后端同时启动 |
+| Backend (bootRun) | 后端 :8080 |
+| Frontend (bun dev) | 前端 :5173 |
 
-#### 命令行启动
+#### 命令行
 
 ```bash
-# 后端
+# 后端（需 JDK 21）
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 ./gradlew bootRun        # → http://localhost:8080
 
 # 前端（新终端）
-cd frontend
-bun install
-bun dev                  # → http://localhost:5173
+cd frontend && bun dev   # → http://localhost:5173
 ```
 
 ### 5. 登录
 
-访问 `http://localhost:5173/login`，输入手机号，验证码固定为 `123456`（开发模式）。
+`http://localhost:5173/login`，验证码 `123456`（开发模式）。
 
 ## 项目结构
 
 ```
 AIPS/
-├── src/                          # 后端 Spring Boot
-│   └── main/java/com/needhelp/aips/
-│       ├── common/               # 通用组件（BaseEntity, ApiResponse, JwtUtil…）
-│       ├── entity/               # JPA 实体（18 张表）
-│       ├── repository/           # Spring Data JPA
-│       ├── service/              # 业务服务（drug/consult/prescription/order/user）
-│       ├── infrastructure/       # 基础服务（auth/ai/file/payment/message）
-│       ├── controller/           # REST 控制器（14 个 API）
-│       └── dto/                  # 请求/响应 DTO
-├── frontend/                     # 前端 Vue 3 + Vite
-│   └── src/
-│       ├── api/                  # Axios 封装 + 5 个 API 模块
-│       ├── stores/               # Pinia（auth/cart/drug）
-│       ├── views/                # 10 个页面组件
-│       ├── components/           # 通用组件（AppHeader, BottomNav, DrugCard…）
-│       ├── router/               # Vue Router + 登录守卫
-│       └── utils/                # 格式化工具
-├── docs/                         # 设计文档（需求/数据库/API/架构）
-├── .idea/runConfigurations/      # IDEA 启动配置（Backend / Frontend / Full Stack）
-├── .env.example                  # 后端环境变量模板
-└── LICENSE                       # AGPL-3.0
+├── src/main/java/com/needhelp/aips/
+│   ├── common/               # BaseEntity, ApiResponse, JwtUtil, SecurityConfig…
+│   ├── entity/               # JPA 实体 (18 tables)
+│   ├── repository/           # Spring Data JPA
+│   ├── service/              # drug / consult / prescription / order / user
+│   ├── infrastructure/       # auth / file / payment / message
+│   ├── controller/           # REST API (14 endpoints)
+│   └── dto/                  # Request / Response DTOs
+├── frontend/src/
+│   ├── api/                  # Axios + 5 个 API 模块
+│   ├── stores/               # Pinia (auth / cart / drug)
+│   ├── views/                # 10 个页面
+│   ├── components/           # AppHeader, BottomNav, DrugCard, ChatMessage…
+│   ├── router/               # Vue Router + auth guard
+│   └── utils/                # formatPrice, formatTime, maskPhone…
+├── docs/                     # 需求 / 数据库 / API / 架构设计文档
+├── .idea/runConfigurations/  # IDEA 启动配置
+└── .env.example              # 环境变量模板
 ```
 
-## API 端点总览
+## RAG 检索增强
+
+AI 药师咨询的 RAG 流程：
+
+```
+用户"头痛发烧" → MedicineRepository.searchByKeyword() → DB 匹配 5 条药品
+  → 拼入 Prompt 作为上下文（名称/价格/库存/适应症）
+  → LangChain4j ChatModel.chat() → DeepSeek V4
+  → 返回结构化 JSON（content / symptomAnalysis / medicineAdvice / warnings / riskLevel）
+```
+
+未配置 LLM API Key 时自动降级为关键词模拟回复。
+
+## API 端点
 
 | 模块 | 方法 | 路径 | 认证 |
 |------|------|------|------|
@@ -144,20 +153,18 @@ AIPS/
 ## 常见命令
 
 ```bash
-# === 后端 ===
+# === 后端 (JDK 21) ===
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+./gradlew bootRun            # 启动 :8080
+./gradlew test               # 5 tests
 ./gradlew build              # 编译 + 测试
-./gradlew bootRun            # 启动（端口 8080）
-./gradlew test               # 运行测试
-./gradlew clean build        # 清理重建
 
 # === 前端 ===
 cd frontend
-bun dev                      # 启动 dev server（端口 5173，热更新）
+bun dev                      # :5173
 bun run build                # 生产构建
-bun vitest run               # 运行测试
-bunx oxlint .                # Lint 检查
-bunx oxfmt --check .         # 格式检查
-bunx oxfmt --write .         # 自动格式化
+bun vitest run               # 测试
+bunx oxlint . && bunx oxfmt --check .   # 质量检查
 ```
 
 ## License
