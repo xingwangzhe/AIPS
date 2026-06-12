@@ -1,0 +1,7 @@
+{
+  "plugins": ["vue", "import", "unicorn"],
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "error"
+  }
+}
