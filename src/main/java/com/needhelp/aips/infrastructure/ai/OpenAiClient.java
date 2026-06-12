@@ -9,12 +9,15 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
- * OpenAI API 客户端。
- * 封装对 OpenAI Chat Completions API 的 HTTP 调用。
+ * LLM API 客户端（兼容 DeepSeek / OpenAI 格式）。
+ *
+ * 模型区分：
+ * - deepseek-v4-flash：快速模式，标准 chat completions
+ * - deepseek-v4-pro ：推理模式，启用 thinking + reasoning_effort
+ *
  * 未配置真实 API Key 时自动降级为关键词模拟回复。
  */
 @Service
@@ -35,28 +38,23 @@ public class OpenAiClient {
     }
 
     /**
-     * 调用 OpenAI Chat API 进行用药咨询。
-     * 若 API Key 未配置（占位值），自动降级为模拟回复。
+     * 调用 LLM API 进行用药咨询。
+     * 根据模型类型自动选择推理/快速模式。
      */
     @SuppressWarnings("unchecked")
     public AiReplyResponse.AiMsg chat(String userMessage) {
-        if (props.getApiKey() == null || props.getApiKey().isBlank() || props.getApiKey().startsWith("sk-your-")) {
-            log.warn("OpenAI API Key 未配置或为占位值，使用模拟回复");
+        if (props.getApiKey() == null || props.getApiKey().isBlank()
+                || props.getApiKey().startsWith("sk-your-")) {
+            log.warn("API Key 未配置或为占位值，使用模拟回复");
             return fallbackReply(userMessage);
         }
 
         try {
-            Map<String, Object> requestBody = Map.of(
-                    "model", props.getModel(),
-                    "messages", List.of(
-                            Map.of("role", "system", "content", props.getSystemPrompt()),
-                            Map.of("role", "user", "content", userMessage)
-                    ),
-                    "temperature", 0.7,
-                    "max_tokens", 1024
-            );
+            // 构建请求体
+            Map<String, Object> requestBody = buildRequestBody(userMessage);
 
-            // RestClient 自动将 JSON 反序列化为 Map
+            log.debug("调用 {} (推理模式={})", props.getModel(), props.isReasoningModel());
+
             Map<String, Object> response = restClient.post()
                     .uri("/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
@@ -69,28 +67,55 @@ public class OpenAiClient {
             Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
             String content = (String) message.get("content");
 
-            log.debug("OpenAI 原始回复: {}", content);
+            // 推理模式：reasoning_content 在单独字段中
+            Object reasoning = message.get("reasoning_content");
+            if (reasoning != null) {
+                log.debug("推理链: {}", reasoning);
+            }
+
+            log.debug("LLM 回复: {}", content);
             return parseStructuredReply(content);
 
         } catch (Exception e) {
-            log.error("OpenAI API 调用失败，降级为模拟回复: {}", e.getMessage());
+            log.error("LLM API 调用失败，降级为模拟回复: {}", e.getMessage());
             return fallbackReply(userMessage);
         }
     }
 
     /**
-     * 解析 AI 返回的结构化 JSON 字符串。
-     * 模型应遵循 system prompt 返回 JSON，但也兼容纯文本回复。
+     * 根据不同模型构建不同的请求体。
      */
+    private Map<String, Object> buildRequestBody(String userMessage) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", props.getModel());
+        body.put("messages", List.of(
+                Map.of("role", "system", "content", props.getSystemPrompt()),
+                Map.of("role", "user", "content", userMessage)
+        ));
+        body.put("temperature", 0.7);
+        body.put("max_tokens", 1024);
+
+        // deepseek-v4-pro 推理模式：启用 thinking
+        if (props.isReasoningModel()) {
+            body.put("thinking", Map.of("type", "enabled"));
+            body.put("reasoning_effort", props.getReasoningEffort());
+
+            // 推理模型建议关闭 temperature（与 thinking 互斥）
+            body.put("temperature", null); // 不传 temperature
+        }
+
+        return body;
+    }
+
+    // ==================== 响应解析（同前） ====================
+
     private AiReplyResponse.AiMsg parseStructuredReply(String content) {
         AiReplyResponse.AiMsg ai = new AiReplyResponse.AiMsg();
         ai.setDisclaimer("本建议仅供参考，请遵医嘱或咨询专业药师。如有严重不适，请立即就医。");
 
-        // 提取 JSON 片段
         String json = extractJson(content);
 
         if (json != null) {
-            // 用简单字符串解析 JSON（避免额外依赖）
             ai.setContent(extractStringField(json, "content", content));
             ai.setSymptomAnalysis(extractStringField(json, "symptomAnalysis", ""));
             ai.setMedicineAdvice(extractStringField(json, "medicineAdvice", ""));
@@ -98,7 +123,6 @@ public class OpenAiClient {
             int riskLevel = extractIntField(json, "riskLevel", 1);
             ai.setRiskLevel(Math.min(Math.max(riskLevel, 1), 3));
         } else {
-            // 未返回 JSON，直接使用原始内容
             ai.setContent(content);
             ai.setSymptomAnalysis("");
             ai.setMedicineAdvice("");
@@ -108,31 +132,25 @@ public class OpenAiClient {
         return ai;
     }
 
-    /** 从内容中提取 JSON 片段 */
     private String extractJson(String content) {
         if (content == null) return null;
-        // 处理 ```json ... ``` 包裹
         int start = content.indexOf("```json");
         if (start >= 0) {
             start = content.indexOf('\n', start) + 1;
             int end = content.indexOf("```", start);
             if (end > start) return content.substring(start, end).trim();
         }
-        // 处理 ``` ... ```
         start = content.indexOf("```");
         if (start >= 0) {
             start = content.indexOf('\n', start) + 1;
             int end = content.indexOf("```", start);
             if (end > start) return content.substring(start, end).trim();
         }
-        // 处理裸 JSON
         if (content.trim().startsWith("{")) return content.trim();
         return null;
     }
 
-    /** 从 JSON 字符串中提取字符串字段值（简易解析） */
     private String extractStringField(String json, String fieldName, String defaultVal) {
-        // 匹配 "fieldName": "value"
         String key = "\"" + fieldName + "\"";
         int keyIdx = json.indexOf(key);
         if (keyIdx < 0) return defaultVal;
@@ -142,22 +160,18 @@ public class OpenAiClient {
         if (valStart < 0) return defaultVal;
         int valEnd = json.indexOf('"', valStart + 1);
         if (valEnd < 0) return defaultVal;
-        String val = json.substring(valStart + 1, valEnd);
-        // 处理转义字符
-        return val.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t");
+        return json.substring(valStart + 1, valEnd)
+                .replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t");
     }
 
-    /** 从 JSON 字符串中提取整数字段值 */
     private int extractIntField(String json, String fieldName, int defaultVal) {
         String key = "\"" + fieldName + "\"";
         int keyIdx = json.indexOf(key);
         if (keyIdx < 0) return defaultVal;
         int colonIdx = json.indexOf(':', keyIdx);
         if (colonIdx < 0) return defaultVal;
-        // 跳过冒号后的空白
         int valStart = colonIdx + 1;
         while (valStart < json.length() && Character.isWhitespace(json.charAt(valStart))) valStart++;
-        // 读取数字
         StringBuilder num = new StringBuilder();
         while (valStart < json.length() && Character.isDigit(json.charAt(valStart))) {
             num.append(json.charAt(valStart));
@@ -167,9 +181,8 @@ public class OpenAiClient {
         try { return Integer.parseInt(num.toString()); } catch (NumberFormatException e) { return defaultVal; }
     }
 
-    /**
-     * 降级方案：API Key 未配置时使用关键词模拟回复。
-     */
+    // ==================== 降级模拟 ====================
+
     private AiReplyResponse.AiMsg fallbackReply(String userContent) {
         AiReplyResponse.AiMsg ai = new AiReplyResponse.AiMsg();
         String lower = userContent.toLowerCase();
@@ -199,7 +212,7 @@ public class OpenAiClient {
             ai.setWarnings("请务必在医生指导下调整降糖药或胰岛素用量，不可自行更改治疗方案");
             ai.setRiskLevel(3);
         } else {
-            ai.setContent("感谢您的咨询。您描述的症状我暂时无法做出准确判断，建议提供更多信息或转接人工药师获取更专业的帮助。");
+            ai.setContent("感谢您的咨询。建议提供更多信息或转接人工药师获取更专业的帮助。");
             ai.setSymptomAnalysis("信息不足，无法进行症状分析");
             ai.setMedicineAdvice("");
             ai.setWarnings("建议详细描述症状，或前往医院就诊");

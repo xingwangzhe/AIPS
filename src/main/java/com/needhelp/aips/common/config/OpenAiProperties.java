@@ -3,8 +3,10 @@ package com.needhelp.aips.common.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.List;
+
 /**
- * OpenAI API 配置属性。
+ * LLM API 配置属性（兼容 DeepSeek / OpenAI 格式）。
  * 映射 application.properties 中的 openai.* 配置项。
  */
 @Configuration
@@ -14,11 +16,18 @@ public class OpenAiProperties {
     /** API Key */
     private String apiKey = "";
 
-    /** API 基础 URL，默认 OpenAI 官方 */
-    private String apiUrl = "https://api.openai.com/v1";
+    /** API 基础 URL */
+    private String apiUrl = "https://api.deepseek.com";
 
-    /** 模型名称 */
-    private String model = "gpt-4o";
+    /**
+     * 模型名称：
+     * - deepseek-v4-flash ：快速模式（非推理），适合简单咨询
+     * - deepseek-v4-pro  ：推理模式（think 链），适合复杂用药分析
+     */
+    private String model = "deepseek-v4-flash";
+
+    /** 推理深度（仅 deepseek-v4-pro 等推理模型有效）：low / medium / high */
+    private String reasoningEffort = "medium";
 
     /** 请求超时秒数 */
     private int timeoutSeconds = 30;
@@ -48,15 +57,25 @@ public class OpenAiProperties {
             每条回复末尾必须附加免责声明："本建议仅供参考，请遵医嘱或咨询专业药师。"
             """;
 
-    // getters / setters
+    // ==================== getters / setters ====================
+
     public String getApiKey() { return apiKey; }
     public void setApiKey(String apiKey) { this.apiKey = apiKey; }
     public String getApiUrl() { return apiUrl; }
     public void setApiUrl(String apiUrl) { this.apiUrl = apiUrl; }
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
+    public String getReasoningEffort() { return reasoningEffort; }
+    public void setReasoningEffort(String reasoningEffort) { this.reasoningEffort = reasoningEffort; }
     public int getTimeoutSeconds() { return timeoutSeconds; }
     public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
     public String getSystemPrompt() { return systemPrompt; }
     public void setSystemPrompt(String systemPrompt) { this.systemPrompt = systemPrompt; }
+
+    // ==================== 派生方法 ====================
+
+    /** 是否需要启用推理模式（deepseek-v4-pro 或 deepseek-reasoner） */
+    public boolean isReasoningModel() {
+        return model != null && (model.contains("v4-pro") || model.contains("reasoner") || model.contains("r1"));
+    }
 }
