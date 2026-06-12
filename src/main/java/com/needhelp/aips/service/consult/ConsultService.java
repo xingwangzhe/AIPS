@@ -4,6 +4,7 @@ import com.needhelp.aips.common.exception.BusinessException;
 import com.needhelp.aips.dto.consult.*;
 import com.needhelp.aips.entity.Consultation;
 import com.needhelp.aips.entity.ConsultationMessage;
+import com.needhelp.aips.infrastructure.ai.OpenAiClient;
 import com.needhelp.aips.repository.ConsultationMessageRepository;
 import com.needhelp.aips.repository.ConsultationRepository;
 import org.springframework.stereotype.Service;
@@ -14,18 +15,21 @@ import java.time.format.DateTimeFormatter;
 
 /**
  * 智能咨询服务。
- * 处理 AI 咨询会话和消息，包含模拟的风险分级逻辑。
+ * 通过 OpenAI API 提供 AI 药师多轮对话，含风险分级与降级容错。
  */
 @Service
 public class ConsultService {
 
     private final ConsultationRepository consultationRepository;
     private final ConsultationMessageRepository messageRepository;
+    private final OpenAiClient openAiClient;
 
     public ConsultService(ConsultationRepository consultationRepository,
-                          ConsultationMessageRepository messageRepository) {
+                          ConsultationMessageRepository messageRepository,
+                          OpenAiClient openAiClient) {
         this.consultationRepository = consultationRepository;
         this.messageRepository = messageRepository;
+        this.openAiClient = openAiClient;
     }
 
     /**
@@ -48,7 +52,7 @@ public class ConsultService {
 
     /**
      * 发送咨询消息并获取 AI 回复。
-     * 使用关键词匹配模拟 AI 回答逻辑。
+     * 通过 OpenAI API 生成结构化回复；未配置 API Key 时自动降级为关键词模拟。
      */
     @Transactional
     public AiReplyResponse sendMessage(Long userId, Long sessionId, String content, Integer msgType) {
@@ -70,8 +74,14 @@ public class ConsultService {
         userMsg.setMsgType(msgType != null ? msgType : 1);
         messageRepository.save(userMsg);
 
-        // 模拟 AI 回答
-        AiReplyResponse.AiMsg aiMsg = generateAiReply(content);
+        // 调用 OpenAI API 生成回复（未配置 Key 时自动降级为模拟回复）
+        AiReplyResponse.AiMsg aiMsg = openAiClient.chat(content);
+
+        // 高风险回答不展示 AI 内容，自动弹出转人工提示
+        if (aiMsg.getRiskLevel() != null && aiMsg.getRiskLevel() == 3) {
+            aiMsg.setContent("您的问题涉及高风险用药，AI 无法直接作答。建议转接人工药师获取专业指导。");
+            aiMsg.setMedicineAdvice("");
+        }
 
         // 保存 AI 回复
         ConsultationMessage aiReplyMsg = new ConsultationMessage();
@@ -114,50 +124,5 @@ public class ConsultService {
         resp.setStatus("waiting");
         resp.setQueuePosition(1);
         return resp;
-    }
-
-    /**
-     * 模拟 AI 回答生成。
-     * 基于关键词匹配，实际生产应接入 LLM。
-     */
-    private AiReplyResponse.AiMsg generateAiReply(String userContent) {
-        AiReplyResponse.AiMsg ai = new AiReplyResponse.AiMsg();
-
-        String lower = userContent.toLowerCase();
-
-        if (lower.contains("头痛") || lower.contains("发烧") || lower.contains("感冒")) {
-            ai.setContent("根据您的描述，头痛伴发烧可能是感冒引起的。建议服用解热镇痛类药物，并多休息多喝水。");
-            ai.setSymptomAnalysis("头痛+发热，疑似感冒前驱症状");
-            ai.setMedicineAdvice("可考虑服用对乙酰氨基酚片（500mg），每日不超过4次");
-            ai.setWarnings("如症状持续超过3天或高烧超过38.5℃，请及时就医");
-            ai.setRiskLevel(1); // 低风险
-        } else if (lower.contains("胃痛") || lower.contains("腹泻") || lower.contains("消化不良")) {
-            ai.setContent("您描述的是消化系统不适症状。可能是饮食不当引起的胃肠道功能紊乱。");
-            ai.setSymptomAnalysis("腹痛/腹泻，疑似消化系统功能紊乱");
-            ai.setMedicineAdvice("可考虑服用蒙脱石散或益生菌制剂，注意清淡饮食");
-            ai.setWarnings("如出现剧烈腹痛、持续呕吐或便血，请立即就医");
-            ai.setRiskLevel(1);
-        } else if (lower.contains("高血压") || lower.contains("血压")) {
-            ai.setContent("高血压是常见的慢性病，需要长期规范治疗。建议定期监测血压并遵医嘱服药。");
-            ai.setSymptomAnalysis("高血压相关问题咨询");
-            ai.setMedicineAdvice("氨氯地平片（5mg每日1次）是常用的一线降压药，请在医生指导下使用");
-            ai.setWarnings("处方药需凭医师处方购买，AI建议仅供参考");
-            ai.setRiskLevel(2); // 中风险 - 涉及处方药
-        } else if (lower.contains("糖尿病") || lower.contains("血糖") || lower.contains("胰岛素")) {
-            ai.setContent("糖尿病用药需要严格的医学监督。AI不能替代内分泌科医生的诊断。");
-            ai.setSymptomAnalysis("糖尿病相关咨询 - 高风险话题");
-            ai.setMedicineAdvice("");
-            ai.setWarnings("请务必在医生指导下调整降糖药或胰岛素用量，不可自行更改治疗方案");
-            ai.setRiskLevel(3); // 高风险 - 转人工
-        } else {
-            ai.setContent("感谢您的咨询。您描述的症状我暂时无法做出准确判断，建议您提供更多信息或转接人工药师获取更专业的帮助。");
-            ai.setSymptomAnalysis("信息不足，无法进行症状分析");
-            ai.setMedicineAdvice("");
-            ai.setWarnings("建议详细描述症状，或前往医院就诊");
-            ai.setRiskLevel(1);
-        }
-
-        ai.setDisclaimer("本建议仅供参考，请遵医嘱或咨询专业药师。如有严重不适，请立即就医。");
-        return ai;
     }
 }
