@@ -16,7 +16,7 @@
 | Hibernate | 7.4 |
 | PostgreSQL | 18.4 |
 | Spring Security + JWT | — |
-| Spring AI (DeepSeek V4) | — |
+| LangChain4j + DeepSeek V4 | — |
 
 ### 前端
 
