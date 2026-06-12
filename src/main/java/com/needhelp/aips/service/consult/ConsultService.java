@@ -167,26 +167,31 @@ public class ConsultService {
         return sb.toString().trim();
     }
 
-    /** 混合检索：先 keyword（快），pgvector 作为增强（需扩展已安装） */
+    /** RAG 向量检索（主）→ keyword 降级 */
     private String searchDrugsVector(String query) {
-        // 1. 先用 keyword 快速搜（不依赖 API）
+        // 1. pgvector 语义向量检索（DeepSeek Embedding API）
+        try {
+            float[] vec = embeddingService.embed(query);
+            if (vec.length > 0) {
+                List<Long> ids = vectorRepo.searchSimilar(vec, 5);
+                if (!ids.isEmpty()) {
+                    log.info("pgvector 命中 {} 条", ids.size());
+                    return formatMedicines(medicineRepository.findAllById(ids));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("pgvector 检索失败: {}", e.getMessage());
+        }
+
+        // 2. 降级到 keyword LIKE 搜索
         String kwResult = searchDrugsKeyword(query);
         if (!kwResult.isEmpty()) return kwResult;
 
-        // 2. keyword 没命中时尝试短词拆分再搜
         for (String sub : splitKeywords(query)) {
             kwResult = searchDrugsKeyword(sub);
             if (!kwResult.isEmpty()) return kwResult;
         }
 
-        // 3. pgvector（仅在扩展可用时生效）
-        try {
-            float[] vec = embeddingService.embed(query);
-            if (vec.length > 0) {
-                List<Long> ids = vectorRepo.searchSimilar(vec, 5);
-                if (!ids.isEmpty()) return formatMedicines(medicineRepository.findAllById(ids));
-            }
-        } catch (Exception e) { /* pgvector 不可用，忽略 */ }
         return "";
     }
 
