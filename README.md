@@ -87,19 +87,21 @@ IDEA 可直接用 Run Configurations → **Full Stack** 一键启动前后端。
 
 ## RAG 检索增强
 
-AI 药师咨询使用 **pgvector + DeepSeek Embedding** 实现语义检索增强：
+AI 药师咨询使用 **pgvector + DeepSeek Embedding API** 实现语义向量检索：
 
 ```
-用户"头痛脑热"
+用户"胃疼"
   → DeepSeek Embedding API → 1536 维向量
-  → pgvector cosine similarity (<=>)  → 匹配语义相近的药品
-  → 药品上下文（名称/价格/库存/适应症）注入 LLM prompt
+  → pgvector <=> 余弦相似度排序 → top 5 语义匹配药品
+  → 药品上下文（名称/价格/库存/适应症）+ 对话历史 → 注入 ChatRequest
   → LangChain4j ChatModel.chat() → DeepSeek V4
-  → 结构化 JSON（content / symptomAnalysis / medicineAdvice / warnings / riskLevel）
+  → 结构化 JSON 回复
 ```
 
-- LLM 异常或 API Key 未配置时自动降级为数据库搜索 + 静态规则回复
-- 药品向量在应用启动时自动索引，无需手动维护
+- 向量检索为**主搜索路径**，keyword LIKE 仅作降级后备
+- 药品向量在应用启动时通过 DeepSeek Embedding API 自动生成并存入 pgvector
+- 对话历史（最近 10 条）作为上下文注入，支持多轮追问
+- LLM / Embedding API 异常时自动降级为数据库搜索 + 症状模板回复
 
 ## 项目结构
 
