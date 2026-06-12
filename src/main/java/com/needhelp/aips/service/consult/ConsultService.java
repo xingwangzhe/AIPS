@@ -7,6 +7,7 @@ import com.needhelp.aips.entity.ConsultationMessage;
 import com.needhelp.aips.entity.Medicine;
 import com.needhelp.aips.infrastructure.ai.EmbeddingService;
 import com.needhelp.aips.repository.*;
+import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -19,7 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 import jakarta.annotation.PostConstruct;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -28,13 +29,14 @@ public class ConsultService {
     private static final Logger log = LoggerFactory.getLogger(ConsultService.class);
 
     private static final String SYSTEM_PROMPT = """
-            你是一名专业 AI 药师助手。根据用户症状进行分析，
-            优先推荐系统药品库中匹配到的药品（名称/价格/库存/适应症）。
-            处方药标注"请遵医嘱"，严格以 JSON 格式回复：
-            {"content":"完整回复","symptomAnalysis":"症状分析","medicineAdvice":"用药建议（含药品名称和价格）","warnings":"注意事项","riskLevel":1}
+            你是专业 AI 药师助手。结合对话历史和药品库匹配结果回答问题。
+            处方药标注"请遵医嘱"。JSON 格式回复：
+            {"content":"完整回复","symptomAnalysis":"症状分析","medicineAdvice":"用药建议","warnings":"注意事项","riskLevel":1}
             riskLevel: 1=低风险OTC 2=中风险(处方药) 3=高风险(转人工)
-            回复末尾附："本建议仅供参考，请遵医嘱或咨询专业药师。"
+            末尾附免责声明。
             """;
+
+    private static final int MAX_HISTORY = 10;
 
     private final ConsultationRepository consultationRepository;
     private final ConsultationMessageRepository messageRepository;
@@ -57,102 +59,112 @@ public class ConsultService {
         this.chatModel = chatModel;
     }
 
-    /** 启动时自动索引未索引药品的向量 */
     @PostConstruct
     void indexMedicines() {
         long count = vectorRepo.countUnindexed();
         if (count == 0) return;
         log.info("开始向量索引 {} 个药品...", count);
-        List<Medicine> all = medicineRepository.findAll();
-        for (Medicine m : all) {
+        for (Medicine m : medicineRepository.findAll()) {
             if (vectorRepo.hasEmbedding(m.getId())) continue;
-            String text = m.getName() + " " + m.getGenericName() + " " + m.getIndications();
-            float[] vec = embeddingService.embed(text);
+            float[] vec = embeddingService.embed(m.getName() + " " + m.getIndications());
             if (vec.length > 0) vectorRepo.saveEmbedding(m.getId(), vec);
         }
         log.info("药品向量索引完成");
     }
 
     public SessionResponse createSession(Long userId, String title) {
-        Consultation session = new Consultation();
-        session.setUserId(userId);
-        session.setSessionTitle(title != null && !title.isEmpty() ? title : "用药咨询");
-        session.setStatus(1);
-        session.setIsTransferred(0);
-        session = consultationRepository.save(session);
-        SessionResponse resp = new SessionResponse();
-        resp.setSessionId(session.getId());
-        resp.setTitle(session.getSessionTitle());
-        resp.setCreatedAt(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
-        return resp;
+        Consultation s = new Consultation();
+        s.setUserId(userId);
+        s.setSessionTitle(title != null && !title.isEmpty() ? title : "用药咨询");
+        s.setStatus(1);
+        s = consultationRepository.save(s);
+        SessionResponse r = new SessionResponse();
+        r.setSessionId(s.getId()); r.setTitle(s.getSessionTitle());
+        r.setCreatedAt(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
+        return r;
     }
 
     @Transactional
     public AiReplyResponse sendMessage(Long userId, Long sessionId, String content, Integer msgType) {
         Consultation session = consultationRepository.findById(sessionId)
                 .orElseThrow(() -> new BusinessException(404, "会话不存在"));
-        if (!session.getUserId().equals(userId))
-            throw new BusinessException(403, "无权访问该会话");
-        if (session.getStatus() != 1)
-            throw new BusinessException(400, "会话已结束或已转人工");
+        if (!session.getUserId().equals(userId)) throw new BusinessException(403, "无权访问");
+        if (session.getStatus() != 1) throw new BusinessException(400, "会话已结束");
 
+        // 保存用户消息
         ConsultationMessage userMsg = new ConsultationMessage();
-        userMsg.setConsultation(session);
-        userMsg.setSenderType(1);
-        userMsg.setContent(content);
-        userMsg.setMsgType(msgType != null ? msgType : 1);
+        userMsg.setConsultation(session); userMsg.setSenderType(1);
+        userMsg.setContent(content); userMsg.setMsgType(msgType != null ? msgType : 1);
         messageRepository.save(userMsg);
 
-        // ===== pgvector 语义检索 =====
-        String drugContext = searchDrugsVector(content);
-        log.info("Vector RAG: matched={}", !drugContext.isEmpty());
+        // ===== 加载对话历史 =====
+        List<ConsultationMessage> history = messageRepository
+                .findByConsultationIdOrderByCreateTimeAsc(sessionId);
+        // 只取最近 N 条（不含刚存的这条）
+        List<ConsultationMessage> recentHistory = history.size() > MAX_HISTORY + 1
+                ? history.subList(history.size() - MAX_HISTORY - 1, history.size() - 1)
+                : history.subList(0, Math.max(0, history.size() - 1));
+
+        // ===== RAG: 从历史+当前消息中提取关键词检索药品 =====
+        String searchText = buildSearchText(recentHistory, content);
+        String drugContext = searchDrugsVector(searchText);
+        log.info("RAG: searchText='{}' matched={}", searchText, !drugContext.isEmpty());
+
+        // ===== 构建对话消息列表 =====
+        List<ChatMessage> messages = new ArrayList<>();
+        messages.add(SystemMessage.from(SYSTEM_PROMPT));
+        // 注入药品上下文
+        if (!drugContext.isEmpty()) {
+            messages.add(UserMessage.from("【药品库匹配结果，请在回复中引用】\n" + drugContext));
+            messages.add(dev.langchain4j.data.message.AiMessage.from("已收到药品库数据，将在回复中引用这些药品。"));
+        }
+        // 注入历史对话
+        for (ConsultationMessage h : recentHistory) {
+            if (h.getSenderType() == 1) messages.add(UserMessage.from(h.getContent()));
+            else messages.add(dev.langchain4j.data.message.AiMessage.from(
+                    h.getContent() != null ? h.getContent() : ""));
+        }
+        // 当前消息
+        messages.add(UserMessage.from(content));
 
         // ===== LLM 调用 =====
         AiReplyResponse.AiMsg aiMsg;
         try {
-            String userPrompt = drugContext.isEmpty()
-                    ? content
-                    : "【药品库匹配结果】\n" + drugContext + "\n\n【用户问题】\n" + content;
-
-            String reply = chatModel.chat(
-                    ChatRequest.builder()
-                            .messages(List.of(
-                                    SystemMessage.from(SYSTEM_PROMPT),
-                                    UserMessage.from(userPrompt)
-                            ))
-                            .build()
-            ).aiMessage().text();
-
-            log.info("LLM 回复 length={}", reply.length());
-            aiMsg = parseStructuredReply(reply);
-
+            String reply = chatModel.chat(ChatRequest.builder().messages(messages).build())
+                    .aiMessage().text();
+            log.info("LLM reply length={}", reply != null ? reply.length() : 0);
+            aiMsg = parseStructuredReply(reply != null ? reply : content);
         } catch (Exception e) {
             log.error("LLM 调用失败: {}", e.toString());
-            // 降级：仍搜数据库给出真实药品推荐
-            aiMsg = fallbackWithDrugs(content, drugContext);
+            aiMsg = fallbackWithContext(searchText, drugContext, recentHistory, content);
         }
 
         if (aiMsg.getRiskLevel() != null && aiMsg.getRiskLevel() == 3) {
-            aiMsg.setContent("该问题涉及高风险用药，AI 无法直接作答。建议转接人工药师。");
+            aiMsg.setContent("该问题涉及高风险用药，建议转接人工药师。");
             aiMsg.setMedicineAdvice("");
         }
 
         ConsultationMessage aiReplyMsg = new ConsultationMessage();
-        aiReplyMsg.setConsultation(session);
-        aiReplyMsg.setSenderType(2);
-        aiReplyMsg.setContent(aiMsg.getContent());
-        aiReplyMsg.setMsgType(1);
-        aiReplyMsg.setRiskLevel(aiMsg.getRiskLevel());
-        aiReplyMsg.setDisclaimerShown(1);
+        aiReplyMsg.setConsultation(session); aiReplyMsg.setSenderType(2);
+        aiReplyMsg.setContent(aiMsg.getContent()); aiReplyMsg.setMsgType(1);
+        aiReplyMsg.setRiskLevel(aiMsg.getRiskLevel()); aiReplyMsg.setDisclaimerShown(1);
         messageRepository.save(aiReplyMsg);
 
         AiReplyResponse resp = new AiReplyResponse();
-        AiReplyResponse.UserMsg uMsg = new AiReplyResponse.UserMsg();
-        uMsg.setId(userMsg.getId());
-        uMsg.setContent(userMsg.getContent());
-        resp.setUserMessage(uMsg);
-        resp.setAiReply(aiMsg);
+        AiReplyResponse.UserMsg u = new AiReplyResponse.UserMsg();
+        u.setId(userMsg.getId()); u.setContent(userMsg.getContent());
+        resp.setUserMessage(u); resp.setAiReply(aiMsg);
         return resp;
+    }
+
+    /** 从历史+当前消息中提取搜索关键词 */
+    private String buildSearchText(List<ConsultationMessage> history, String current) {
+        StringBuilder sb = new StringBuilder();
+        for (ConsultationMessage h : history) {
+            if (h.getSenderType() == 1 && h.getContent() != null) sb.append(h.getContent()).append(" ");
+        }
+        sb.append(current);
+        return sb.toString().trim();
     }
 
     /** pgvector 语义检索 → 降级关键词 */
@@ -163,44 +175,35 @@ public class ConsultService {
             List<Long> ids = vectorRepo.searchSimilar(vec, 5);
             if (ids.isEmpty()) return searchDrugsKeyword(query);
             return formatMedicines(medicineRepository.findAllById(ids));
-        } catch (Exception e) {
-            log.warn("向量检索失败: {}", e.getMessage());
-            return "";
-        }
+        } catch (Exception e) { return searchDrugsKeyword(query); }
     }
 
-    private String searchDrugsKeyword(String keyword) {
+    private String searchDrugsKeyword(String kw) {
         try {
             List<Medicine> meds = medicineRepository
-                    .searchByKeyword(keyword, org.springframework.data.domain.PageRequest.of(0, 5))
-                    .getContent();
+                    .searchByKeyword(kw, org.springframework.data.domain.PageRequest.of(0, 5)).getContent();
             return meds.isEmpty() ? "" : formatMedicines(meds);
         } catch (Exception e) { return ""; }
     }
 
     private String formatMedicines(List<Medicine> meds) {
         return meds.stream()
-                .map(m -> String.format("- %s【%s】%s · ¥%.2f · %s · 适应症：%s",
+                .map(m -> String.format("- %s【%s】%s · ¥%.2f · %s · %s",
                         m.getName(), m.getIsPrescription() == 1 ? "RX" : "OTC",
                         m.getSpecification(), m.getPrice(),
-                        m.getStock() > 0 ? "库存" + m.getStock() : "缺货",
-                        m.getIndications() != null ? m.getIndications() : "暂无"))
+                        m.getStock() > 0 ? "库存"+m.getStock() : "缺货",
+                        m.getIndications() != null ? m.getIndications() : "暂无适应症"))
                 .collect(Collectors.joining("\n"));
     }
 
     public TransferResponse transferToHuman(Long userId, Long sessionId, String reason) {
-        Consultation session = consultationRepository.findById(sessionId)
+        Consultation s = consultationRepository.findById(sessionId)
                 .orElseThrow(() -> new BusinessException(404, "会话不存在"));
-        if (!session.getUserId().equals(userId))
-            throw new BusinessException(403, "无权操作该会话");
-        session.setStatus(3);
-        session.setIsTransferred(1);
-        consultationRepository.save(session);
-        TransferResponse resp = new TransferResponse();
-        resp.setSessionId(sessionId);
-        resp.setStatus("waiting");
-        resp.setQueuePosition(1);
-        return resp;
+        if (!s.getUserId().equals(userId)) throw new BusinessException(403, "无权操作");
+        s.setStatus(3); s.setIsTransferred(1); consultationRepository.save(s);
+        TransferResponse r = new TransferResponse();
+        r.setSessionId(sessionId); r.setStatus("waiting"); r.setQueuePosition(1);
+        return r;
     }
 
     // ========== JSON 解析 ==========
@@ -214,11 +217,9 @@ public class ConsultService {
             ai.setSymptomAnalysis(extractStringField(json, "symptomAnalysis", ""));
             ai.setMedicineAdvice(extractStringField(json, "medicineAdvice", ""));
             ai.setWarnings(extractStringField(json, "warnings", ""));
-            int r = extractIntField(json, "riskLevel", 1);
-            ai.setRiskLevel(Math.min(Math.max(r, 1), 3));
+            ai.setRiskLevel(Math.min(Math.max(extractIntField(json, "riskLevel", 1), 1), 3));
         } else {
-            ai.setContent(content);
-            ai.setRiskLevel(1);
+            ai.setContent(content); ai.setRiskLevel(1);
         }
         return ai;
     }
@@ -248,28 +249,30 @@ public class ConsultService {
         try { return Integer.parseInt(n.toString()); } catch (NumberFormatException e) { return d; }
     }
 
-    // ========== 降级（含数据库检索） ==========
+    // ========== 智能降级 ==========
 
-    private AiReplyResponse.AiMsg fallbackWithDrugs(String content, String drugContext) {
+    private AiReplyResponse.AiMsg fallbackWithContext(String searchText, String drugContext,
+                                                       List<ConsultationMessage> history, String current) {
         AiReplyResponse.AiMsg ai = new AiReplyResponse.AiMsg();
-        String l = content.toLowerCase();
 
+        // 有药品匹配结果 → 直接推荐
         if (!drugContext.isEmpty()) {
-            ai.setContent("根据您的症状，系统中有以下匹配药品：\n" + drugContext + "\n\n建议在药师指导下选用。");
+            ai.setContent("根据您的症状，推荐以下药品：\n" + drugContext);
             ai.setMedicineAdvice(drugContext);
-        } else if (l.contains("头痛") || l.contains("发烧") || l.contains("感冒") || l.contains("脑热")) {
-            ai.setContent("头痛发热可能是感冒引起，建议多休息、多喝水。系统中可选用布洛芬缓释胶囊或对乙酰氨基酚片。");
-            ai.setMedicineAdvice("布洛芬缓释胶囊(¥19.90) 或 对乙酰氨基酚片(¥12.50)");
-        } else if (l.contains("胃痛") || l.contains("腹泻") || l.contains("消化不良")) {
-            ai.setContent("消化系统不适，建议清淡饮食。");
-            ai.setMedicineAdvice("蒙脱石散(¥15.50) 或 奥美拉唑肠溶胶囊(¥28.00)");
-        } else {
-            ai.setContent("请详细描述您的症状（如头痛、发烧、咳嗽、胃痛等），以便为您推荐合适的药品。");
+            ai.setRiskLevel(1);
+            ai.setDisclaimer("本建议仅供参考。");
+            return ai;
         }
-        ai.setSymptomAnalysis(l.contains("头痛") || l.contains("发烧") ? "疑似感冒症状" : "信息不足");
+
+        // 有关键词但没搜到药 → 建议去搜索页
+        String lower = searchText.toLowerCase();
+        if (lower.length() > 2 && (lower.contains("药") || lower.contains("痛") || lower.contains("病") || lower.contains("咳"))) {
+            ai.setContent("您提到了「" + searchText.replace("\n", " ") + "」，建议前往药品搜索页查找具体药品，或提供更详细的症状描述。");
+        } else {
+            ai.setContent("请详细描述您的症状（如头痛、发烧、咳嗽等），告诉我哪里不舒服，以便为您推荐合适的药品。");
+        }
         ai.setRiskLevel(1);
-        ai.setWarnings("如症状持续或加重，请及时就医。");
-        ai.setDisclaimer("本建议仅供参考，请遵医嘱或咨询专业药师。");
+        ai.setDisclaimer("本建议仅供参考。");
         return ai;
     }
 }
